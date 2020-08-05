@@ -1,0 +1,510 @@
+---
+title: "Penguin"
+author: "MW"
+date: "8/2/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+```{r import-library, message=FALSE}
+library(tidytuesdayR)
+library(tidyverse)
+library(grid)
+library(gridExtra)
+library(flextable)
+library(officer)
+library(magrittr)
+library(ggradar)
+library(scales)
+library(tidymodels)
+library(themis)
+library(ranger)
+```
+
+
+```{r load-data, include=FALSE}
+# tuesdata <- tidytuesdayR::tt_load('2020-08-04')
+# tuesdata <- tidytuesdayR::tt_load(2020, week = 31)
+# 
+# penguins <- tuesdata$penguins
+
+# write_csv(penguins, "penguins.csv")
+
+penguins <- read_csv("penguins.csv")
+glimpse(penguins)
+
+```
+
+
+# 1. Exploration Data Analysis
+
+```{r stat, include=FALSE}
+# Inspect stat
+summary(penguins) 
+
+tot_na <- penguins %>%
+  map_df(~sum(is.na(.)))
+
+str(tot_na)
+
+penguins[which(is.na(penguins$sex)),] %$%
+  table(.$species, .$year) -> na_sex
+
+```
+
+According to statistical summary, mean and median of numeric variables are not significantly different. 
+
+The penguin dataset has `r ncol(penguins)` variables consist of `r ncol(penguins %>% select_if(is.character))` character variables and `r ncol(penguins %>% select_if(is.numeric))` numeric variables (including year variable). There are `r length(unique(penguins$species))` species (`r unique(penguins$species)`) for each sex (male and female), `r length(unique(penguins$island))` islands (`r unique(penguins$island)`). Observation in the penguin dataset was took place  in `r paste0(unique(penguins$year)[1], ", ", unique(penguins$year)[2], ", ", "and ", unique(penguins$year)[3])`.
+
+There are `r nrow(penguins)` with the following missing observations:
+
+```{r table-na-obs}
+big_border <- fp_border(color="orange", width = 2)
+border_v <- fp_border(color="gray")
+border_h <- fp_border(color="gray")
+
+na_obs <- tot_na %>%
+  select_if(~ . > 0) %>%
+  pivot_longer(cols = everything(), names_to = "Column", values_to = "Value")
+
+na_obs %>%
+  flextable(cwidth= 1.5) %>%
+  set_header_labels(Column = "Column Name", Value = "No of missing observation") %>%
+  colformat_num(j = "Value", big.mark = ",", digits = 0) %>%
+  border_outer(part="all", border = big_border ) %>%
+  border_inner_h(part="all", border = border_h ) %>%
+  border_inner_v(part="all", border = border_v ) %>%
+  bg(bg = "cornsilk", part="header") %>%
+  align(align = "center", part = "all") %>%
+  bold(part = "header") %>%
+  fontsize(part="all", size = 9)
+
+```
+
+<br>
+
+`r na_obs %>% filter(Value == max(Value)) %>% pull(Value)` observations were missing for `r na_obs %>% filter(Value == max(Value)) %>% pull(Column)` variable. Summary of missing observation in sex variable is tabulized as follow:
+
+<br>
+
+```{r table-na-sex}
+na_sex %>%
+  as.data.frame() %>%
+  pivot_wider(names_from = "Var2", values_from = "Freq") %>%
+  rename("Species" = "Var1") %>%
+  flextable(cwidth= 1) %>%
+  border_outer(part="all", border = big_border ) %>%
+  border_inner_h(part="all", border = border_h ) %>%
+  border_inner_v(part="all", border = border_v ) %>%
+  bg(bg = "cornsilk", part="header") %>%
+  align(align = "center", part = "header") %>%
+  align_text_col(align = "left", header = FALSE) %>%
+  align_nottext_col(align = "center", header = FALSE) %>%
+  bold(part = "header") %>%
+  fontsize(part="all", size = 9)
+
+```
+
+<br>
+
+Imputation on missing data for sex variable will be done before modelling.
+
+
+
+```{r count-species, include=FALSE}
+# Inspect number of each species
+count_species <-  penguins %>%
+  count(species, sort = TRUE) %>%
+  ggplot(aes(x = fct_reorder(species, -n), y = n, fill = species)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.25) +
+  labs(x = "Species", y = "",
+       title = "No of observation by species") +
+  theme(legend.position = "bottom",
+        panel.background = element_rect(fill = "white"),
+        axis.ticks.x = element_blank()) +
+  guides(fill=guide_legend(title=""))
+
+sex_lab <- c("Female", "Male")
+names(sex_lab) <- c("female", "male")
+
+count_species_sex <-  penguins %>%
+  count(species, sex, sort = TRUE) %>%
+  filter(!is.na(sex)) %>%
+  ggplot(aes(x = fct_reorder(species, -n), y = n, fill = species)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.1, size = 3.5) +
+  labs(x = "Species", y = "",
+       title = "No of observation by species and sex") +
+  theme(legend.position = "bottom",
+        panel.background = element_rect(fill = "white"),
+        axis.ticks.x = element_blank()) +
+  guides(fill=guide_legend(title="")) +
+  facet_wrap(~ sex, scales = "free_y",
+             labeller = labeller(sex = sex_lab))
+
+
+```
+
+According to bar plot below, penguins dataset contains balance of observation number between female and male, but imbalance exist within species.
+
+<br>
+
+```{r plot-species-sex, fig.width = 10}
+grid.arrange(count_species, count_species_sex, nrow = 1)
+```
+
+<br>
+
+
+## 1.1 Data Distribution
+
+Gentoo's bill depth, body mass, and flipper length are vary significantly compare to other species. Adelie can be distinguished clearly compare to other species from its bill length.
+
+<br>
+
+```{r boxplot-metric}
+penguins %>%
+  pivot_longer(cols = bill_length_mm:body_mass_g, 
+               names_to = "metric",
+               values_to = "value") %>%
+  ggplot(aes(x = species, y = value, fill = species)) +
+  geom_boxplot(show.legend = FALSE) +
+  facet_wrap(~ metric, scales = "free_y") +
+  labs(x = "Species", y = "", title = "Boxplot for observation metrics of penguin")
+
+
+```
+
+<br>
+
+From the boxplot and radar charts below, metric by sex shown that male has higher value than female. 
+
+```{r boxplot-metric-sex, fig.width=10}
+boxplot_metric_sex <- function(metric_type) {
+  penguins %>%
+  pivot_longer(cols = bill_length_mm:body_mass_g, 
+               names_to = "metric",
+               values_to = "value") %>%
+  filter(!is.na(sex),
+         metric == metric_type) %>%
+  ggplot(aes(x = species, y = value, fill = species)) +
+  geom_boxplot(show.legend = FALSE) +
+  facet_wrap(~ sex) +
+  labs(x = "Species", y = "", title = paste0("Distribution by ", 
+                                             str_replace_all(metric_type, "_|mm", " "),
+                                             " and sex"))
+}
+
+boxplot_bd_sex <- boxplot_metric_sex("bill_depth_mm")
+boxplot_bl_sex <- boxplot_metric_sex("bill_length_mm")
+boxplot_fl_sex <- boxplot_metric_sex("flipper_length_mm")
+boxplot_bmg_sex <- boxplot_metric_sex("body_mass_g")
+
+grid.arrange(boxplot_bd_sex, boxplot_bl_sex, boxplot_fl_sex, boxplot_bmg_sex)
+```
+
+<br>
+
+From the radar chart below, it is clear that male physical value is higher than female. Chinstrap has the highest value in bill depth and bill length compare to other species. 
+
+<br>
+
+```{r radar-metric-sex}
+penguins %>%
+  filter(!is.na(sex)) %>%
+  mutate(species_sex = str_c(species, sex, sep = "-")) %>%
+  group_by(species_sex) %>%
+  summarise(across(bill_length_mm:body_mass_g, mean)) %>% 
+  mutate_if(is.numeric, rescale) %>%
+  rename(`Bill Length` = "bill_length_mm", `Bill Depth` = "bill_depth_mm", `Flipper Length` = "flipper_length_mm",
+         `Body Mass` = "body_mass_g") %>%
+  ggradar(legend.position = "bottom", axis.label.size = 3, grid.label.size = 3,
+          legend.text.size = 10, group.point.size = 3, group.line.width = 1)
+
+
+```
+
+<br>
+
+```{r boxplot-metric-year, fig.width=10}
+boxplot_metric_year <- function(metric_type) {
+  penguins %>%
+  pivot_longer(cols = bill_length_mm:body_mass_g, 
+               names_to = "metric",
+               values_to = "value") %>%
+  filter(!is.na(sex),
+         metric == metric_type) %>%
+  ggplot(aes(x = species, y = value, fill = species)) +
+  geom_boxplot(show.legend = FALSE) +
+  facet_wrap(~ year) +
+  labs(x = "Species", y = "", title = paste0("Distribution by ", 
+                                             str_replace_all(metric_type, "_|mm", " "))) +
+  scale_x_discrete(guide = guide_axis(n.dodge = 2))  
+}
+
+boxplot_bd_year <- boxplot_metric_year("bill_depth_mm")
+boxplot_bl_year <- boxplot_metric_year("bill_length_mm")
+boxplot_fl_year <- boxplot_metric_year("flipper_length_mm")
+boxplot_bmg_year <- boxplot_metric_year("body_mass_g")
+
+grid.arrange(boxplot_bd_year, boxplot_bl_year, boxplot_fl_year, boxplot_bmg_year)
+```
+<br>
+
+Data distribution appears follow normal distribution for all metrics.
+
+
+```{r dens-hist-metric, fig.width=10}
+hist_metric <- penguins %>%
+  pivot_longer(cols = bill_length_mm:body_mass_g, 
+               names_to = "metric",
+               values_to = "value") %>%
+  ggplot(aes(value, fill = species)) +
+  geom_histogram(bins = 20) +
+  facet_wrap(~ metric, scales = "free_x")
+
+dens_metric <- penguins %>%
+  pivot_longer(cols = bill_length_mm:body_mass_g, 
+               names_to = "metric",
+               values_to = "value") %>%
+  ggplot(aes(value, fill = species)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~ metric, scales = "free") 
+
+grid.arrange(dens_metric, hist_metric)
+
+```
+
+<br>
+
+Below bar plot shown number of observation by island and species. Adelie lives in the three islands, but Gentoo and Chinstrap lives in Biscoe island and Dream island, respectively.
+
+```{r bar-species-island}
+penguins %>%
+  ggplot(aes(x = island, fill = species)) +
+  geom_bar(stat = "count") +
+  geom_text(aes(label = (..count..)),
+            stat = "count",  position = position_stack(vjust = 0.5)) +
+  labs(x = "Island", y = "", title = "No of observation by island and species") +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(title = ""))
+
+
+```
+
+<br>
+
+The following plot describe measurement of physical appearance from 2017 to 2019. It may draw penguin scientist attention to preserve penguins species considering Adelie and Chinstrap species overcome decreasing bill depth, and body mass. 
+
+```{r yoy-metric, fig.width=12}
+penguins %>%
+  mutate(year = factor(year, levels = c("2007", "2008", "2009"))) %>%
+  filter(!is.na(sex)) %>%
+  group_by(species, year) %>%
+  summarise_if(is.numeric, mean) %>%
+  pivot_longer(cols = bill_length_mm:body_mass_g, 
+               names_to = "metric",
+               values_to = "value") %>%
+  ggplot(aes(x = year, y = value, group = species, color = species)) +
+  geom_path() +
+  geom_point(show.legend = FALSE) +
+  geom_text(aes(label = round(value, 2)), size = 3.5, hjust = -0.1, fontface = "bold", show.legend = FALSE) +
+  facet_wrap(~ metric, scales = "free") +
+  labs(x = "Year", y = "", title = "Physical growth of penguins from 2017 to 2019") +
+  theme(legend.position = "right") +
+  guides(fill = guide_legend(title = ""))
+
+```
+
+
+## 1.2 Missing Data Imputation
+
+Missing data existed for Adelie and Gentoo. Imputation missing data on sex variable is performed based on metric's value. Radar chart above clearly shown influence metric for each species and sex.  
+
+```{r summarise-species-sex-mean, include=FALSE}
+sum_mean <- penguins %>%
+  mutate(year = factor(year, levels = c("2007", "2008", "2009"))) %>%
+  filter(!is.na(sex),
+         species != "Chinstrap") %>%
+  group_by(species, sex) %>%
+  summarise_if(is.numeric, mean)
+
+```
+
+```{r summ-mean-imp-table}
+sum_mean %>%
+  flextable(cwidth= 0.8) %>%
+  set_header_labels(species = "Species", sex = "Sex", bill_length_mm = "Bill Length (in mm)",
+                    bill_depth_mm = "Bill Depth (in mm)", flipper_length_mm = "Flipper Length (in mm)",
+                    body_mass_g = "Body Mass") %>%
+  colformat_num(j = c("bill_length_mm", "bill_depth_mm", "flipper_length_mm", "body_mass_g"), 
+                big.mark = ",", digits = 2) %>%
+  border_outer(part="all", border = big_border ) %>%
+  border_inner_h(part="all", border = border_h ) %>%
+  border_inner_v(part="all", border = border_v ) %>%
+  bg(bg = "cornsilk", part="header") %>%
+  align(align = "center", part = "all") %>%
+  merge_v(j = ~ species) %>%
+  bold(part = "header") %>%
+  fontsize(part="all", size = 12)
+
+```
+
+
+```{r penguin-imp-clean}
+penguins_imp <- penguins %>%
+  mutate(imp_sex = case_when(
+    is.na(sex) & species == "Adelie" & body_mass_g > sum_mean$body_mass_g[2] ~ "male",
+    is.na(sex) & species == "Adelie" & body_mass_g < sum_mean$body_mass_g[2] ~ "female",
+    is.na(sex) & species == "Gentoo" & body_mass_g > sum_mean$body_mass_g[4] ~ "male",
+    is.na(sex) & species == "Gentoo" & body_mass_g < sum_mean$body_mass_g[4] ~ "female",
+    TRUE ~ as.character(sex)
+    ),
+    year = factor(year, levels = c("2007", "2008", "2009"))) %>%
+  mutate_if(is.character, factor) %>%
+  select(-sex) %>%
+  na.omit()
+
+
+```
+
+
+
+
+## Model Building
+
+
+
+```{r train-test-boot, include=FALSE}
+set.seed(1647)
+
+penguins_split <- initial_split(penguins_imp)
+penguins_train <- training(penguins_split)
+penguins_test <- testing(penguins_split)
+
+set.seed(1656)
+penguins_boot <- bootstraps(penguins_train)
+
+
+```
+
+
+```{r recipe, include=FALSE}
+penguins_rec <- recipe(species ~ ., data = penguins_imp) %>%
+  #update_role(, new_role = "Id") %>%
+  #step_other() %>%
+  step_dummy(island, year, imp_sex) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  step_smote(species)
+
+penguins_prep <- prep(penguins_rec)
+
+juice(penguins_prep)
+```
+
+```{r workflow, include=FALSE}
+penguins_wf <- workflow() %>%
+  add_recipe(penguins_rec) 
+```
+
+```{r rf-ranger-model, include=FALSE}
+
+rf_mod <- rand_forest() %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+rf_result <- penguins_wf %>%
+  add_model(rf_mod) %>%
+  fit_resamples(
+    resamples = penguins_boot,
+    control = control_resamples(save_pred = TRUE, verbose = TRUE)
+  )
+
+collect_metrics(rf_result)
+
+conf_mat_resampled(rf_result)
+
+```
+
+
+```{r model-acc}
+rf_result %>%
+  collect_predictions() %>%
+  conf_mat(species, .pred_class)
+
+```
+
+
+```{r model-roc}
+rf_result %>%
+  collect_predictions() %>%
+  roc_curve(species, .pred_Adelie:.pred_Gentoo) %>%
+  autoplot()
+
+```
+
+
+
+```{r rf-test-result, include=FALSE}
+rf_test_result <- penguins_wf %>%
+  add_model(rf_mod) %>%
+  last_fit(penguins_split)
+
+
+```
+
+
+```{r test-acc}
+rf_test_result %>%
+  collect_predictions() %>%
+  conf_mat(species, .pred_class)
+
+```
+
+
+```{r test-roc}
+rf_test_result %>%
+  collect_predictions() %>%
+  roc_curve(species, .pred_Adelie:.pred_Gentoo) %>%
+  autoplot()
+
+```
+
+
+```{r}
+# glm_mod <- logistic_reg() %>%
+#   set_engine("glm")
+# 
+# 
+# glm_result <- penguins_wf %>%
+#   add_model(glm_mod) %>%
+#   fit_resamples(
+#     resamples = penguins_boot,
+#     control = control_resamples(save_pred = TRUE, verbose = TRUE)
+#   )
+# 
+# collect_metrics(glm_result)
+# 
+# 
+# glm_result %>%
+#   conf_mat_resampled()
+# 
+# glm_result %>%
+#   collect_predictions()
+# 
+# glm_result %>%
+#   collect_predictions() %>%
+#   conf_mat(species, .pred_class)
+# 
+# glm_result %>%
+#   collect_predictions() %>%
+#   ppv(species, .pred_class)
+```
+
+
