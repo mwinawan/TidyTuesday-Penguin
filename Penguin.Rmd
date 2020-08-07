@@ -480,7 +480,7 @@ rf_test_result <- penguins_wf %>%
 
 
 ```
-The result is perfect. It can predict all test set with correct species.
+The result is almost perfect. It can predict all test set with correct species, except for 1 case which Adelie is predicted as Gentoo.
 
 ```{r test-acc}
 rf_test_result %>%
