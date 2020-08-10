@@ -23,6 +23,8 @@ library(scales)
 library(tidymodels)
 library(themis)
 library(ranger)
+library(magick)
+library(cowplot)
 ```
 
 
@@ -33,6 +35,10 @@ penguins <- read_csv("penguins.csv")
 # check data structure
 glimpse(penguins)
 
+# load penguin picture
+img <- image_read("penguin.png") %>%
+  image_resize("570x380") %>%
+  image_colorize(20, "white")
 ```
 
 
@@ -177,7 +183,6 @@ penguins %>%
   facet_wrap(~ metric, scales = "free_y") +
   labs(x = "Species", y = "", title = "Boxplot for observation metrics of penguin")
 
-
 ```
 
 <br>
@@ -268,15 +273,19 @@ grid.arrange(dens_metric, hist_metric)
 Below bar plot shows number of observation by island and species. Adelie lives in the three islands, but Gentoo and Chinstrap lives in Biscoe island and Dream island, respectively.
 
 ```{r bar-species-island}
-penguins %>%
+bar_island_spec <- penguins %>%
   ggplot(aes(x = island, fill = species)) +
-  geom_bar(stat = "count") +
+  geom_bar(stat = "count", alpha = 0.7) +
   geom_text(aes(label = (..count..)),
             stat = "count",  position = position_stack(vjust = 0.5)) +
   labs(x = "Island", y = "", title = "No of observation by island and species") +
   theme(legend.position = "bottom") +
+  theme_minimal_hgrid() +
   guides(fill = guide_legend(title = ""))
 
+ggdraw() +
+  draw_image(img) +
+  draw_plot(bar_island_spec)
 
 ```
 
@@ -318,11 +327,14 @@ penguins %>%
   group_by(species_sex) %>%
   summarise(across(bill_length_mm:body_mass_g, mean)) %>% 
   mutate_if(is.numeric, rescale) %>%
-  rename(`Bill Length` = "bill_length_mm", `Bill Depth` = "bill_depth_mm", `Flipper Length` = "flipper_length_mm",
+  rename(`Bill Length` = "bill_length_mm", `Bill Depth` = "bill_depth_mm", 
+         `Flipper Length` = "flipper_length_mm",
          `Body Mass` = "body_mass_g") %>%
   ggradar(legend.position = "bottom", axis.label.size = 3, grid.label.size = 3,
           legend.text.size = 10, group.point.size = 3, group.line.width = 1,
-          plot.title = "Metric Comparison between species and its sex")
+          plot.title = "Metric Comparison between species and its sex",
+          values.radar = c(0, 0.5, 1)) + 
+  theme(plot.title = element_text(hjust = 0.5, size = 16))
 
 
 ```
@@ -456,7 +468,8 @@ After added model to the `workflow`, bootstrapped training data is ready to be f
 ```{r model-acc}
 rf_result %>%
   collect_predictions() %>%
-  conf_mat(species, .pred_class)
+  conf_mat(species, .pred_class) %>%
+  autoplot(type = "heatmap")
 
 ```
 
@@ -480,12 +493,13 @@ rf_test_result <- penguins_wf %>%
 
 
 ```
-The result is almost perfect. It can predict all test set with correct species, except for 1 case which Adelie is predicted as Gentoo.
+The result is almost perfect. It can predict all test set with correct species, except for 1 case that Adelie is predicted as Gentoo.
 
 ```{r test-acc}
 rf_test_result %>%
   collect_predictions() %>%
-  conf_mat(species, .pred_class)
+  conf_mat(species, .pred_class) %>%
+  autoplot(type = "heatmap")
 
 ```
 
